@@ -874,8 +874,12 @@ def serve_file_for_viewing(session_id, filename):
         if colmap_processor:
             colmap_progress = colmap_processor.get_progress(session_id)
             if colmap_progress:
+                stage = colmap_progress.get('stage', 'unknown')
+                # Convert enum to string if it's an enum
+                if hasattr(stage, 'value'):
+                    stage = stage.value
                 status_data['detailed_progress'] = {
-                    'stage': colmap_progress.get('stage', 'unknown'),
+                    'stage': stage,
                     'progress_percent': colmap_progress.get('progress_percent', 0),
                     'stage_message': colmap_progress.get('message', '')
                 }
@@ -999,11 +1003,25 @@ def colmap_status(session_id):
         if progress.get('end_time'):
             progress['end_time'] = progress['end_time'].isoformat()
         
+        # Convert enum objects to strings for JSON serialization
+        def serialize_for_json(obj):
+            """Recursively convert enum objects to JSON-serializable values."""
+            if hasattr(obj, 'value'):  # Handle enum objects
+                return obj.value
+            elif isinstance(obj, dict):
+                return {k: serialize_for_json(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [serialize_for_json(item) for item in obj]
+            else:
+                return obj
+        
+        serializable_progress = serialize_for_json(progress)
+        
         logger.info(f"Retrieved COLMAP status for session {session_id}: {progress['status']}")
         
         return jsonify({
             'session_id': session_id,
-            'colmap_progress': progress
+            'colmap_progress': serializable_progress
         }), 200
         
     except Exception as e:
@@ -1075,13 +1093,18 @@ def colmap_results(session_id):
         logger.info(f"Retrieved COLMAP results for session {session_id}")
         
         # Convert enum objects to strings for JSON serialization
-        serializable_progress = {}
-        for key, value in progress.items():
-            if hasattr(value, 'value'):
-                # Convert enum to string
-                serializable_progress[key] = value.value
+        def serialize_for_json(obj):
+            """Recursively convert enum objects to JSON-serializable values."""
+            if hasattr(obj, 'value'):  # Handle enum objects
+                return obj.value
+            elif isinstance(obj, dict):
+                return {k: serialize_for_json(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [serialize_for_json(item) for item in obj]
             else:
-                serializable_progress[key] = value
+                return obj
+        
+        serializable_progress = serialize_for_json(progress)
         
         return jsonify({
             'session_id': session_id,
