@@ -1106,14 +1106,17 @@ def colmap_results(session_id):
         
         serializable_progress = serialize_for_json(progress)
         
-        return jsonify({
+        # Prepare response data with careful serialization
+        response_data = {
             'session_id': session_id,
             'status': 'completed',
-            'processing_time': (progress.get('end_time') or progress.get('start_time')),
+            'processing_time': serialize_for_json(progress.get('end_time') or progress.get('start_time')),
             'workspace_directory': workspace_dir,
-            'output_files': output_files,
+            'output_files': serialize_for_json(output_files),
             'colmap_progress': serializable_progress
-        }), 200
+        }
+        
+        return jsonify(response_data), 200
         
     except Exception as e:
         logger.error(f"Error retrieving COLMAP results for session {session_id}: {str(e)}")
