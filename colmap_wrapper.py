@@ -139,16 +139,60 @@ class ColmapProcessor:
     def _verify_colmap_installation(self):
         """Verify that COLMAP is installed and accessible."""
         try:
-            result = subprocess.run(['colmap', '-h'], 
-                                  capture_output=True, 
-                                  text=True, 
+            result = subprocess.run(['colmap', '-h'],
+                                  capture_output=True,
+                                  text=True,
                                   timeout=10)
             if result.returncode == 0:
                 self.logger.info("COLMAP installation verified")
+                self._check_parameter_support()
             else:
                 raise ColmapError("COLMAP command failed")
         except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError) as e:
             raise ColmapError(f"COLMAP not found or not working: {str(e)}")
+    
+    def _check_parameter_support(self):
+        """Check which advanced parameters are supported by this COLMAP version."""
+        # Test feature_extractor help to see available parameters
+        try:
+            result = subprocess.run(['colmap', 'feature_extractor', '-h'],
+                                  capture_output=True,
+                                  text=True,
+                                  timeout=10)
+            help_text = result.stdout.lower()
+            
+            # Check for DSP-SIFT support
+            if 'estimate_affine_shape' not in help_text or 'domain_size_pooling' not in help_text:
+                self.enable_dsp_sift = False
+                self.logger.warning("DSP-SIFT parameters not supported, disabling advanced features")
+            
+            # Check for GPU support
+            if 'use_gpu' not in help_text:
+                self.use_gpu = False
+                self.logger.warning("GPU parameters not supported, disabling GPU acceleration")
+                
+        except Exception as e:
+            self.logger.warning(f"Could not check parameter support: {str(e)}, using conservative settings")
+            # Disable advanced features as fallback
+            self.enable_dsp_sift = False
+            self.enable_guided_matching = False
+            self.use_gpu = False
+        
+        # Test matcher help for guided matching
+        try:
+            result = subprocess.run(['colmap', 'exhaustive_matcher', '-h'],
+                                  capture_output=True,
+                                  text=True,
+                                  timeout=10)
+            help_text = result.stdout.lower()
+            
+            if 'guided_matching' not in help_text:
+                self.enable_guided_matching = False
+                self.logger.warning("Guided matching not supported, disabling feature")
+                
+        except Exception as e:
+            self.logger.warning(f"Could not check matcher parameters: {str(e)}")
+            self.enable_guided_matching = False
     
     def process_images(self, session_id: str, image_files: List[str], async_mode: bool = False) -> Dict[str, Any]:
         """
@@ -202,7 +246,7 @@ class ColmapProcessor:
                 
                 # Get final progress status
                 final_progress = self.get_progress(session_id)
-                if final_progress and final_progress['status'] == ProcessingStatus.COMPLETED:
+                if final_progress and final_progress['status'] == ProcessingStatus.COMPLETED.value:
                     return {
                         "message": "COLMAP processing completed successfully",
                         "session_id": session_id,
@@ -277,21 +321,19 @@ class ColmapProcessor:
                 "--SiftExtraction.max_image_size", str(self.max_image_size)
             ]
             
-            # Add DSP-SIFT optimizations for better features
+            # Add DSP-SIFT optimizations for better features (if supported by this COLMAP version)
             if self.enable_dsp_sift:
                 feature_cmd.extend([
                     "--SiftExtraction.estimate_affine_shape", "true",
                     "--SiftExtraction.domain_size_pooling", "true"
                 ])
             
-            # Add GPU acceleration if enabled
+            # Add GPU acceleration if enabled and supported
             if self.use_gpu:
                 feature_cmd.extend([
                     "--SiftExtraction.use_gpu", "true",
                     "--SiftExtraction.gpu_index", self.gpu_indices
                 ])
-            else:
-                feature_cmd.extend(["--SiftExtraction.use_gpu", "false"])
             
             self._run_colmap_command(feature_cmd, session_id)
             
@@ -315,20 +357,18 @@ class ColmapProcessor:
                     "--database_path", str(database_path)
                 ]
             
-            # Add guided matching for better results
+            # Add guided matching for better results (if supported by this COLMAP version)
             if self.enable_guided_matching:
                 match_cmd.extend(["--SiftMatching.guided_matching", "true"])
             
-            # Add GPU acceleration for matching if enabled
+            # Add GPU acceleration for matching if enabled and supported
             if self.use_gpu:
                 match_cmd.extend([
                     "--SiftMatching.use_gpu", "true",
                     "--SiftMatching.gpu_index", self.gpu_indices
                 ])
-            else:
-                match_cmd.extend(["--SiftMatching.use_gpu", "false"])
             
-            self._run_colmap_command(match_cmd, session_id)
+            self._run_colmap_command(match_cmd, session_id, timeout_minutes=10)
             
             if self._cancel_flags[session_id].is_set():
                 self._handle_cancellation(session_id)
@@ -347,7 +387,7 @@ class ColmapProcessor:
                 "--database_path", str(database_path),
                 "--image_path", str(images_dir),
                 "--output_path", str(sparse_dir)
-            ], session_id)
+            ], session_id, timeout_minutes=20)  # Mapper can take time but 20min should be max for 20 images
             
             if self._cancel_flags[session_id].is_set():
                 self._handle_cancellation(session_id)
@@ -445,8 +485,13 @@ class ColmapProcessor:
                 if mesh_ply_path.exists():
                     output_files.append({"type": "mesh", "path": str(mesh_ply_path)})
             
-            # Create compressed archive
-            self._create_model_archive(session_id, workspace_dir, output_files)
+            # Create compressed archive (optional, don't fail if this doesn't work)
+            try:
+                self._create_model_archive(session_id, workspace_dir, output_files)
+                self.logger.info(f"Successfully created model archive for session {session_id}")
+            except Exception as archive_error:
+                self.logger.warning(f"Failed to create model archive for session {session_id}: {str(archive_error)}")
+                # Continue processing - archive creation is not critical
             
             # Update final progress
             self._update_progress(session_id, ProcessingStage.COMPLETED,
@@ -454,16 +499,27 @@ class ColmapProcessor:
                                 "COLMAP processing completed successfully",
                                 output_files=output_files)
             
+            return  # Important: Return here to avoid hitting the exception handler
+            
         except Exception as e:
-            self.logger.error(f"COLMAP processing failed for session {session_id}: {str(e)}")
+            error_details = f"COLMAP processing failed for session {session_id}: {str(e)}"
+            self.logger.error(error_details)
+            self.logger.exception("Full exception details:")  # This will log the full stack trace
+            
+            # Ensure we have a meaningful error message
+            error_message = str(e) if str(e) and str(e).strip() else "Unknown COLMAP processing error"
+            
             self._update_progress(session_id, ProcessingStage.ERROR,
                                 ProcessingStatus.ERROR, 0.0,
-                                f"Processing failed: {str(e)}",
-                                error_message=str(e))
+                                f"Processing failed: {error_message}",
+                                error_message=error_message)
     
-    def _run_colmap_command(self, command: List[str], session_id: str):
-        """Run a COLMAP command with error handling and cancellation support."""
+    def _run_colmap_command(self, command: List[str], session_id: str, timeout_minutes: int = 30):
+        """Run a COLMAP command with error handling, cancellation support, and timeout."""
         try:
+            self.logger.info(f"Running COLMAP command: {' '.join(command)}")
+            start_time = time.time()
+            
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
@@ -471,56 +527,140 @@ class ColmapProcessor:
                 text=True
             )
             
-            # Monitor for cancellation
+            # Monitor for cancellation and timeout
             while process.poll() is None:
                 if self._cancel_flags[session_id].is_set():
                     process.terminate()
                     process.wait(timeout=5)
                     raise ColmapError("Processing cancelled by user")
+                
+                # Check for timeout
+                elapsed_time = time.time() - start_time
+                if elapsed_time > (timeout_minutes * 60):
+                    self.logger.warning(f"COLMAP command timeout after {timeout_minutes} minutes: {' '.join(command)}")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    
+                    # Get partial output for debugging
+                    stdout_output, stderr_output = process.communicate()
+                    error_msg = f"COLMAP command timed out after {timeout_minutes} minutes"
+                    if stderr_output:
+                        error_msg += f"\nPartial STDERR: {stderr_output.strip()[-1000:]}"  # Last 1000 chars
+                    if stdout_output:
+                        error_msg += f"\nPartial STDOUT: {stdout_output.strip()[-1000:]}"  # Last 1000 chars
+                    error_msg += f"\nCommand: {' '.join(command)}"
+                    error_msg += f"\nThis may indicate challenging images with insufficient overlap or too many features."
+                    
+                    raise ColmapError(error_msg)
+                
+                # Log progress every 5 minutes for long-running commands
+                if elapsed_time > 0 and int(elapsed_time) % 300 == 0:  # Every 5 minutes
+                    self.logger.info(f"COLMAP command still running after {int(elapsed_time/60)} minutes: {command[1]}")
+                
                 time.sleep(0.1)
             
+            # Get output
+            stdout_output, stderr_output = process.communicate()
+            elapsed_time = time.time() - start_time
+            
             if process.returncode != 0:
-                stderr_output = process.stderr.read()
-                raise ColmapError(f"COLMAP command failed: {stderr_output}")
+                error_msg = f"COLMAP command failed with return code {process.returncode} after {elapsed_time:.1f}s"
+                if stderr_output:
+                    error_msg += f"\nSTDERR: {stderr_output.strip()}"
+                if stdout_output:
+                    error_msg += f"\nSTDOUT: {stdout_output.strip()}"
+                error_msg += f"\nCommand: {' '.join(command)}"
+                
+                self.logger.error(error_msg)
+                raise ColmapError(error_msg)
+            else:
+                self.logger.info(f"COLMAP command completed successfully in {elapsed_time:.1f}s: {command[1]}")
+                if stdout_output and len(stdout_output.strip()) > 0:
+                    self.logger.debug(f"STDOUT: {stdout_output.strip()}")
                 
         except subprocess.TimeoutExpired:
             process.kill()
-            raise ColmapError("COLMAP command timed out")
+            error_msg = f"COLMAP command process timeout: {' '.join(command)}"
+            self.logger.error(error_msg)
+            raise ColmapError(error_msg)
+        except Exception as e:
+            error_msg = f"Unexpected error running COLMAP command: {str(e)}\nCommand: {' '.join(command)}"
+            self.logger.error(error_msg)
+            raise ColmapError(error_msg)
     
     def _create_model_archive(self, session_id: str, workspace_dir: Path, output_files: List[Dict]):
         """Create a compressed archive of the generated models."""
-        archive_path = workspace_dir / f"model_{session_id}.zip"
-        
-        with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Add model files
-            for file_info in output_files:
-                file_path = Path(file_info['path'])
-                if file_path.exists():
-                    arcname = f"{file_info['type']}/{file_path.name}"
-                    zipf.write(file_path, arcname)
+        try:
+            archive_path = workspace_dir / f"model_{session_id}.zip"
             
-            # Add metadata
-            metadata = {
-                "session_id": session_id,
-                "created_at": datetime.now().isoformat(),
-                "output_files": output_files,
-                "processing_parameters": {
-                    "enable_dense_reconstruction": self.enable_dense_reconstruction,
-                    "enable_meshing": self.enable_meshing,
-                    "max_image_size": self.max_image_size,
-                    "matcher_type": self.matcher_type,
-                    "use_gpu": self.use_gpu,
-                    "gpu_indices": self.gpu_indices,
-                    "enable_dsp_sift": self.enable_dsp_sift,
-                    "enable_guided_matching": self.enable_guided_matching,
-                    "enable_geometric_consistency": self.enable_geometric_consistency
-                }
-            }
+            # Ensure we have files to archive
+            if not output_files:
+                self.logger.warning(f"No output files to archive for session {session_id}")
+                return
             
-            metadata_path = workspace_dir / "model_metadata.json"
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-            zipf.write(metadata_path, "metadata.json")
+            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Add model files
+                files_added = 0
+                for file_info in output_files:
+                    try:
+                        file_path = Path(file_info['path'])
+                        if file_path.exists() and file_path.is_file():
+                            arcname = f"{file_info['type']}/{file_path.name}"
+                            zipf.write(file_path, arcname)
+                            files_added += 1
+                            self.logger.debug(f"Added {file_path} to archive as {arcname}")
+                        else:
+                            self.logger.warning(f"Output file not found or not a file: {file_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to add file {file_info.get('path', 'unknown')} to archive: {str(e)}")
+                
+                if files_added == 0:
+                    self.logger.warning(f"No files were successfully added to archive for session {session_id}")
+                    return
+                
+                # Add metadata
+                try:
+                    metadata = {
+                        "session_id": session_id,
+                        "created_at": datetime.now().isoformat(),
+                        "output_files": output_files,
+                        "processing_parameters": {
+                            "enable_dense_reconstruction": self.enable_dense_reconstruction,
+                            "enable_meshing": self.enable_meshing,
+                            "max_image_size": self.max_image_size,
+                            "matcher_type": self.matcher_type,
+                            "use_gpu": self.use_gpu,
+                            "gpu_indices": self.gpu_indices,
+                            "enable_dsp_sift": self.enable_dsp_sift,
+                            "enable_guided_matching": self.enable_guided_matching,
+                            "enable_geometric_consistency": self.enable_geometric_consistency
+                        }
+                    }
+                    
+                    metadata_path = workspace_dir / "model_metadata.json"
+                    with open(metadata_path, 'w') as f:
+                        json.dump(metadata, f, indent=2)
+                    zipf.write(metadata_path, "metadata.json")
+                    self.logger.debug(f"Added metadata to archive for session {session_id}")
+                    
+                    # Clean up temporary metadata file
+                    try:
+                        metadata_path.unlink()
+                    except Exception:
+                        pass  # Ignore cleanup errors
+                        
+                except Exception as e:
+                    self.logger.warning(f"Failed to add metadata to archive for session {session_id}: {str(e)}")
+                
+            self.logger.info(f"Successfully created archive {archive_path} with {files_added} files")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create model archive for session {session_id}: {str(e)}")
+            raise  # Re-raise to be caught by the calling code
     
     def _update_progress(self, session_id: str, stage: ProcessingStage, 
                         status: ProcessingStatus, progress_percent: float, 

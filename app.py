@@ -874,28 +874,6 @@ def serve_file_for_viewing(session_id, filename):
     except Exception as e:
         logger.error(f"Error serving file {filename} for viewing in session {session_id}: {str(e)}")
         return jsonify({'error': 'Failed to serve file'}), 500
-        
-        # Add additional details if available from COLMAP processor
-        if colmap_processor:
-            colmap_progress = colmap_processor.get_progress(session_id)
-            if colmap_progress:
-                stage = colmap_progress.get('stage', 'unknown')
-                # Convert enum to string if it's an enum
-                if hasattr(stage, 'value'):
-                    stage = stage.value
-                status_data['detailed_progress'] = {
-                    'stage': stage,
-                    'progress_percent': colmap_progress.get('progress_percent', 0),
-                    'stage_message': colmap_progress.get('message', '')
-                }
-        
-        logger.info(f"Retrieved status for session {session_id}: {status_data['status']}")
-        
-        return jsonify(status_data), 200
-        
-    except Exception as e:
-        logger.error(f"Error retrieving status for session {session_id}: {str(e)}")
-        return jsonify({'error': 'Failed to retrieve processing status'}), 500
 
 # COLMAP 3D Reconstruction Endpoints
 

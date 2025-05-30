@@ -81,7 +81,7 @@ export default function Home() {
           3D Photogrammetry
         </h1>
         <p className="text-lg text-gray-600">
-          Upload multiple images of an object to create a 3D model using photogrammetry
+          Upload multiple images of an object to create a 3D model.
         </p>
       </div>
 

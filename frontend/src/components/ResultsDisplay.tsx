@@ -4,6 +4,20 @@ import { useState, useEffect } from 'react'
 import { ProcessingResults, ModelFile, ModelInfo } from '@/types'
 import { apiClient, downloadFileFromBlob, formatFileSize } from '@/lib/api'
 import ModelViewer from './ModelViewer'
+import dynamic from 'next/dynamic'
+
+// Dynamically import PLYViewer to avoid SSR issues
+const PLYViewer = dynamic(() => import('./PLYViewer'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-full bg-black rounded-lg">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-4"></div>
+        <p className="text-white text-sm">Loading PLY viewer...</p>
+      </div>
+    </div>
+  )
+})
 
 interface ResultsDisplayProps {
   sessionId: string
@@ -32,10 +46,27 @@ export default function ResultsDisplay({ sessionId, results }: ResultsDisplayPro
   const handleDownloadAll = async () => {
     try {
       setDownloading('all')
-      // Download as zip or individual files
+      // First, get download metadata
       const response = await fetch(results.download_url)
-      const blob = await response.blob()
-      downloadFileFromBlob(blob, `3d-model-${sessionId.slice(0, 8)}.zip`)
+      const data = await response.json()
+      
+      if (data.available_files && data.available_files.length > 0) {
+        // Download each file individually since backend doesn't provide zip
+        for (const file of data.available_files) {
+          try {
+            const fileResponse = await fetch(file.download_url)
+            const blob = await fileResponse.blob()
+            const filename = file.download_url.split('/').pop() || 'model-file'
+            downloadFileFromBlob(blob, filename)
+            // Small delay between downloads to avoid overwhelming the browser
+            await new Promise(resolve => setTimeout(resolve, 500))
+          } catch (fileError) {
+            console.error(`Failed to download ${file.download_url}:`, fileError)
+          }
+        }
+      } else {
+        console.error('No files available for download')
+      }
     } catch (error) {
       console.error('Download all failed:', error)
     } finally {
@@ -108,9 +139,10 @@ export default function ResultsDisplay({ sessionId, results }: ResultsDisplayPro
 
   // Extract available 3D model files from the output_files array
   const getAvailable3DFiles = (): Array<{type: string, path: string, size: number}> => {
-    if (!results.output_files) return []
+    if (!results.output_files || !Array.isArray(results.output_files)) return []
     
     return results.output_files.filter(file => {
+      if (!file || !file.path || typeof file.path !== 'string') return false
       const ext = file.path.split('.').pop()?.toLowerCase()
       return ['obj', 'ply', 'gltf', 'glb', 'fbx'].includes(ext || '')
     })
@@ -257,12 +289,21 @@ export default function ResultsDisplay({ sessionId, results }: ResultsDisplayPro
           
           <div className="h-96 md:h-[500px]">
             {selectedModel ? (
-              <ModelViewer
-                modelFile={selectedModel}
-                onModelLoad={handleModelLoad}
-                onError={handleModelError}
-                className="w-full h-full"
-              />
+              selectedModel.type === 'ply' ? (
+                <PLYViewer
+                  modelFile={selectedModel}
+                  onModelLoad={handleModelLoad}
+                  onError={handleModelError}
+                  className="w-full h-full"
+                />
+              ) : (
+                <ModelViewer
+                  modelFile={selectedModel}
+                  onModelLoad={handleModelLoad}
+                  onError={handleModelError}
+                  className="w-full h-full"
+                />
+              )
             ) : (
               <div className="flex items-center justify-center h-full bg-gray-50">
                 <div className="text-center">
@@ -386,9 +427,10 @@ export default function ResultsDisplay({ sessionId, results }: ResultsDisplayPro
       <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
         <h3 className="text-sm font-medium text-blue-800 mb-2">How to Use Your 3D Model</h3>
         <ul className="text-sm text-blue-700 space-y-1">
-          <li>• <strong>PLY files:</strong> Open in MeshLab, CloudCompare, or Blender</li>
+          <li>• <strong>PLY files:</strong> View directly in the browser or open in MeshLab, CloudCompare, or Blender</li>
           <li>• <strong>OBJ files:</strong> Import into 3D software like Blender, Maya, or 3ds Max</li>
-          <li>• <strong>Point clouds:</strong> View in specialized software like CloudCompare</li>
+          <li>• <strong>Point clouds:</strong> Interactive viewer with white points on black background</li>
+          <li>• <strong>Browser viewer:</strong> Drag to rotate, scroll to zoom, right-click to pan</li>
           <li>• <strong>Textures:</strong> Apply to your 3D model for realistic rendering</li>
         </ul>
       </div>
