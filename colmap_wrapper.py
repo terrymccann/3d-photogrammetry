@@ -91,7 +91,12 @@ class ColmapProcessor:
                  enable_meshing: bool = False,
                  max_image_size: int = 1920,
                  matcher_type: str = "exhaustive",
-                 cleanup_temp_files: bool = False):
+                 cleanup_temp_files: bool = False,
+                 use_gpu: bool = True,
+                 gpu_indices: str = "0",
+                 enable_dsp_sift: bool = True,
+                 enable_guided_matching: bool = True,
+                 enable_geometric_consistency: bool = True):
         """
         Initialize COLMAP processor.
         
@@ -102,6 +107,11 @@ class ColmapProcessor:
             max_image_size: Maximum image dimension for processing
             matcher_type: Type of feature matching ("exhaustive" or "sequential")
             cleanup_temp_files: Whether to automatically clean up temporary files
+            use_gpu: Whether to use GPU acceleration for SIFT processing
+            gpu_indices: Comma-separated GPU indices (e.g., "0,1,2,3")
+            enable_dsp_sift: Enable Domain Size Pooling SIFT for better features
+            enable_guided_matching: Enable guided matching for improved results
+            enable_geometric_consistency: Enable geometric consistency in dense reconstruction
         """
         self.base_output_dir = Path(base_output_dir)
         self.base_output_dir.mkdir(exist_ok=True)
@@ -110,6 +120,11 @@ class ColmapProcessor:
         self.enable_meshing = enable_meshing
         self.max_image_size = max_image_size
         self.matcher_type = matcher_type.lower()
+        self.use_gpu = use_gpu
+        self.gpu_indices = gpu_indices
+        self.enable_dsp_sift = enable_dsp_sift
+        self.enable_guided_matching = enable_guided_matching
+        self.enable_geometric_consistency = enable_geometric_consistency
         
         # Progress tracking
         self._progress: Dict[str, ColmapProgress] = {}
@@ -253,14 +268,32 @@ class ColmapProcessor:
                                 ProcessingStatus.RUNNING, 15.0,
                                 "Extracting features from images")
             
-            # Feature extraction
-            self._run_colmap_command([
+            # Feature extraction with performance optimizations
+            feature_cmd = [
                 "colmap", "feature_extractor",
                 "--database_path", str(database_path),
                 "--image_path", str(images_dir),
                 "--ImageReader.single_camera", "1",
                 "--SiftExtraction.max_image_size", str(self.max_image_size)
-            ], session_id)
+            ]
+            
+            # Add DSP-SIFT optimizations for better features
+            if self.enable_dsp_sift:
+                feature_cmd.extend([
+                    "--SiftExtraction.estimate_affine_shape", "true",
+                    "--SiftExtraction.domain_size_pooling", "true"
+                ])
+            
+            # Add GPU acceleration if enabled
+            if self.use_gpu:
+                feature_cmd.extend([
+                    "--SiftExtraction.use_gpu", "true",
+                    "--SiftExtraction.gpu_index", self.gpu_indices
+                ])
+            else:
+                feature_cmd.extend(["--SiftExtraction.use_gpu", "false"])
+            
+            self._run_colmap_command(feature_cmd, session_id)
             
             if self._cancel_flags[session_id].is_set():
                 self._handle_cancellation(session_id)
@@ -270,17 +303,32 @@ class ColmapProcessor:
                                 ProcessingStatus.RUNNING, 35.0,
                                 "Matching features between images")
             
-            # Feature matching
+            # Feature matching with performance optimizations
             if self.matcher_type == "sequential":
-                self._run_colmap_command([
+                match_cmd = [
                     "colmap", "sequential_matcher",
                     "--database_path", str(database_path)
-                ], session_id)
+                ]
             else:
-                self._run_colmap_command([
+                match_cmd = [
                     "colmap", "exhaustive_matcher",
                     "--database_path", str(database_path)
-                ], session_id)
+                ]
+            
+            # Add guided matching for better results
+            if self.enable_guided_matching:
+                match_cmd.extend(["--SiftMatching.guided_matching", "true"])
+            
+            # Add GPU acceleration for matching if enabled
+            if self.use_gpu:
+                match_cmd.extend([
+                    "--SiftMatching.use_gpu", "true",
+                    "--SiftMatching.gpu_index", self.gpu_indices
+                ])
+            else:
+                match_cmd.extend(["--SiftMatching.use_gpu", "false"])
+            
+            self._run_colmap_command(match_cmd, session_id)
             
             if self._cancel_flags[session_id].is_set():
                 self._handle_cancellation(session_id)
@@ -340,11 +388,27 @@ class ColmapProcessor:
                     "--output_type", "COLMAP"
                 ], session_id)
                 
-                # Patch match stereo
-                self._run_colmap_command([
+                # Patch match stereo with optimizations
+                stereo_cmd = [
                     "colmap", "patch_match_stereo",
-                    "--workspace_path", str(dense_dir)
-                ], session_id)
+                    "--workspace_path", str(dense_dir),
+                    "--PatchMatchStereo.max_image_size", str(self.max_image_size)
+                ]
+                
+                # Add geometric consistency if enabled
+                if self.enable_geometric_consistency:
+                    stereo_cmd.extend([
+                        "--PatchMatchStereo.geom_consistency", "true",
+                        "--PatchMatchStereo.filter", "true"
+                    ])
+                
+                # Add GPU acceleration for patch match stereo if enabled
+                if self.use_gpu:
+                    stereo_cmd.extend([
+                        "--PatchMatchStereo.gpu_index", self.gpu_indices
+                    ])
+                
+                self._run_colmap_command(stereo_cmd, session_id)
                 
                 # Stereo fusion
                 self._run_colmap_command([
@@ -444,7 +508,12 @@ class ColmapProcessor:
                     "enable_dense_reconstruction": self.enable_dense_reconstruction,
                     "enable_meshing": self.enable_meshing,
                     "max_image_size": self.max_image_size,
-                    "matcher_type": self.matcher_type
+                    "matcher_type": self.matcher_type,
+                    "use_gpu": self.use_gpu,
+                    "gpu_indices": self.gpu_indices,
+                    "enable_dsp_sift": self.enable_dsp_sift,
+                    "enable_guided_matching": self.enable_guided_matching,
+                    "enable_geometric_consistency": self.enable_geometric_consistency
                 }
             }
             
@@ -484,8 +553,8 @@ class ColmapProcessor:
         progress = self._progress[session_id]
         return {
             "session_id": progress.session_id,
-            "stage": progress.stage,
-            "status": progress.status,
+            "stage": progress.stage.value if hasattr(progress.stage, 'value') else str(progress.stage),
+            "status": progress.status.value if hasattr(progress.status, 'value') else str(progress.status),
             "progress_percent": progress.progress_percent,
             "message": progress.message,
             "start_time": progress.start_time,
@@ -559,6 +628,12 @@ def validate_image_set(image_files: List[str]) -> Tuple[bool, str]:
     if len(image_files) < 2:
         return False, "At least 2 images are required for 3D reconstruction"
     
+    if len(image_files) < 3:
+        # Allow but warn for 2 images
+        validation_msg = f"Warning: Only {len(image_files)} images provided. At least 3 images are recommended for robust 3D reconstruction."
+    else:
+        validation_msg = f"Image set validation passed: {len(image_files)} images"
+    
     # Check if files exist and are accessible
     for image_path in image_files:
         if not os.path.exists(image_path):
@@ -567,4 +642,4 @@ def validate_image_set(image_files: List[str]) -> Tuple[bool, str]:
         if not os.access(image_path, os.R_OK):
             return False, f"Image file not readable: {image_path}"
     
-    return True, f"Image set validation passed: {len(image_files)} images"
+    return True, validation_msg

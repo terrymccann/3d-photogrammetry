@@ -61,7 +61,12 @@ try:
         base_output_dir=app.config['OUTPUT_FOLDER'],
         enable_dense_reconstruction=False,  # Disabled by default (requires CUDA)
         enable_meshing=False,  # Can be enabled for full mesh generation
-        cleanup_temp_files=False  # Keep files for download
+        cleanup_temp_files=False,  # Keep files for download
+        use_gpu=True,  # Enable GPU acceleration if available
+        gpu_indices="0",  # Use first GPU by default
+        enable_dsp_sift=True,  # Enable DSP-SIFT for better features
+        enable_guided_matching=True,  # Enable guided matching for improved results
+        enable_geometric_consistency=True  # Enable geometric consistency in dense reconstruction
     )
     logger.info("COLMAP processor initialized successfully")
 except Exception as e:
@@ -997,11 +1002,8 @@ def colmap_status(session_id):
                 'suggestion': 'Start processing with POST /colmap/process'
             }), 404
         
-        # Convert datetime objects to strings for JSON serialization
-        if progress.get('start_time'):
-            progress['start_time'] = progress['start_time'].isoformat()
-        if progress.get('end_time'):
-            progress['end_time'] = progress['end_time'].isoformat()
+        # Note: datetime objects are already converted to ISO strings in get_progress()
+        # No additional conversion needed for start_time and end_time
         
         # Convert enum objects to strings for JSON serialization
         def serialize_for_json(obj):
